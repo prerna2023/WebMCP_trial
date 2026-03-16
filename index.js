@@ -84,18 +84,41 @@ const TOOLS = [
 
 // ── Tool handlers (using built-in fetch, no axios needed) ─────
 async function search_web({ query, max_results = 5 }) {
-    const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1`;
-    const res  = await fetch(url);
-    const data = await res.json();
+    try {
+        // DuckDuckGo HTML search — more reliable than the JSON API
+        const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+        const res  = await fetch(url, {
+            headers: {
+                "User-Agent": "Mozilla/5.0 (compatible; research-agent/1.0)"
+            },
+            signal: AbortSignal.timeout(8000)
+        });
 
-    const results = (data.RelatedTopics || []).slice(0, max_results);
-    if (results.length === 0) {
-        return `No results found for "${query}". Try rephrasing the query.`;
+        const html = await res.text();
+
+        // Extract result snippets from HTML
+        const results = [];
+        const pattern = /<a class="result__snippet"[^>]*>(.*?)<\/a>/gs;
+        const titles  = /<a class="result__a"[^>]*>(.*?)<\/a>/gs;
+
+        const titleMatches   = [...html.matchAll(titles)].slice(0, max_results);
+        const snippetMatches = [...html.matchAll(pattern)].slice(0, max_results);
+
+        for (let i = 0; i < Math.min(titleMatches.length, max_results); i++) {
+            const title   = titleMatches[i][1].replace(/<[^>]+>/g, "").trim();
+            const snippet = snippetMatches[i]?.[1].replace(/<[^>]+>/g, "").trim() ?? "";
+            results.push(`${i + 1}. ${title}\n   ${snippet}`);
+        }
+
+        if (results.length === 0) {
+            return `No results found for "${query}". Try a different search term.`;
+        }
+
+        return `Search results for "${query}":\n\n${results.join("\n\n")}`;
+
+    } catch (e) {
+        return `Search failed: ${e.message}. Try rephrasing the query.`;
     }
-
-    return results.map((r, i) =>
-        `${i + 1}. ${r.Text || "No description"}\n   URL: ${r.FirstURL || "N/A"}`
-    ).join("\n\n");
 }
 
 async function fetch_page_content({ url }) {
