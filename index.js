@@ -1,6 +1,5 @@
 import express from "express";
 import crypto  from "crypto";
-import axios   from "axios";
 
 const app  = express();
 app.use(express.json());
@@ -10,20 +9,19 @@ function requireApiKey(req, res, next) {
     const provided = req.headers["x-api-key"];
     const valid    = process.env.WEBMCP_API_KEY;
 
-    // Constant-time compare to prevent timing attacks
     const match = provided && crypto.timingSafeEqual(
         Buffer.from(provided.padEnd(64)),
         Buffer.from(valid.padEnd(64))
     );
 
     if (!match) {
-        console.warn(`[AUTH FAIL] ${new Date().toISOString()} — bad key from ${req.ip}`);
+        console.warn(`[AUTH FAIL] ${new Date().toISOString()}`);
         return res.status(401).json({ error: "Unauthorized" });
     }
     next();
 }
 
-// ── In-memory scratchpad (use Redis in production) ────────────
+// ── In-memory scratchpad ──────────────────────────────────────
 const notes = {};
 
 // ── Tool definitions ──────────────────────────────────────────
@@ -37,8 +35,8 @@ const TOOLS = [
         inputSchema: {
             type: "object",
             properties: {
-                query:       { type: "string",  description: "Specific search query" },
-                max_results: { type: "number",  description: "Results to return (1-10). Default 5." }
+                query:       { type: "string", description: "Specific search query" },
+                max_results: { type: "number", description: "Results to return (1-10). Default 5." }
             },
             required: ["query"]
         }
@@ -46,8 +44,8 @@ const TOOLS = [
     {
         name: "fetch_page_content",
         description: `Fetches the full text content of a webpage.
-      Use AFTER search_web when you need to read a full article, not just its snippet.
-      Returns the main text of the page, stripped of HTML.`,
+      Use AFTER search_web when you need the full article, not just the snippet.
+      Returns the main text stripped of HTML.`,
         inputSchema: {
             type: "object",
             properties: {
@@ -59,12 +57,12 @@ const TOOLS = [
     {
         name: "save_note",
         description: `Save a piece of information to your scratchpad with a key.
-      Use mid-task to remember important findings before moving to the next step.
+      Use mid-task to remember important findings.
       Overwrites if the key already exists.`,
         inputSchema: {
             type: "object",
             properties: {
-                key:     { type: "string", description: "Short label, e.g. 'competitor_prices'" },
+                key:     { type: "string", description: "Short label e.g. 'competitor_prices'" },
                 content: { type: "string", description: "The information to save." }
             },
             required: ["key", "content"]
@@ -84,14 +82,13 @@ const TOOLS = [
     }
 ];
 
-// ── Tool handlers ─────────────────────────────────────────────
+// ── Tool handlers (using built-in fetch, no axios needed) ─────
 async function search_web({ query, max_results = 5 }) {
-    // Using DuckDuckGo's free instant answer API
-    const res = await axios.get("https://api.duckduckgo.com/", {
-        params: { q: query, format: "json", no_redirect: 1 }
-    });
-    const results = res.data.RelatedTopics?.slice(0, max_results) || [];
+    const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1`;
+    const res  = await fetch(url);
+    const data = await res.json();
 
+    const results = (data.RelatedTopics || []).slice(0, max_results);
     if (results.length === 0) {
         return `No results found for "${query}". Try rephrasing the query.`;
     }
@@ -103,16 +100,18 @@ async function search_web({ query, max_results = 5 }) {
 
 async function fetch_page_content({ url }) {
     try {
-        const res  = await axios.get(url, { timeout: 8000 });
-        // Strip HTML tags, collapse whitespace
-        const text = res.data
+        const res  = await fetch(url, { signal: AbortSignal.timeout(8000) });
+        const html = await res.text();
+
+        const text = html
             .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
             .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
             .replace(/<[^>]+>/g, " ")
             .replace(/\s+/g, " ")
             .trim()
-            .slice(0, 4000); // cap at 4000 chars to protect context window
-        return text || "Page appears to be empty or unreadable.";
+            .slice(0, 4000);
+
+        return text || "Page appears empty or unreadable.";
     } catch (e) {
         return `Could not fetch page: ${e.message}. Try a different URL.`;
     }
@@ -130,13 +129,10 @@ function get_note({ key }) {
 const handlers = { search_web, fetch_page_content, save_note, get_note };
 
 // ── Routes ────────────────────────────────────────────────────
-
-// Tool discovery — Claude calls this on connect
 app.get("/", requireApiKey, (req, res) => {
     res.json({ tools: TOOLS });
 });
 
-// Tool execution — Claude calls this to run a tool
 app.post("/", requireApiKey, async (req, res) => {
     const { method, params } = req.body;
 
@@ -154,7 +150,6 @@ app.post("/", requireApiKey, async (req, res) => {
         const result = await fn(params.arguments);
         res.json({ content: [{ type: "text", text: result }] });
     } catch (e) {
-        // Return error as text — agent can reason about it
         res.json({ content: [{ type: "text", text: `Tool error: ${e.message}` }] });
     }
 });
